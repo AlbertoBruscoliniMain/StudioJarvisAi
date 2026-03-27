@@ -24,7 +24,31 @@ from openjarvis.server.models import (
     UsageInfo,
 )
 
+import pathlib
+import shutil
+import uuid as _uuid
+
+from fastapi import UploadFile, File
+
 router = APIRouter()
+
+_UPLOAD_DIR = pathlib.Path.home() / ".openjarvis" / "uploads"
+_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+_ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+@router.post("/v1/upload")
+async def upload_image(file: UploadFile = File(...)):
+    """Save an uploaded image and return its local path."""
+    suffix = pathlib.Path(file.filename or "image.png").suffix.lower()
+    if suffix not in _ALLOWED_EXTENSIONS:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+    dest = _UPLOAD_DIR / f"{_uuid.uuid4().hex}{suffix}"
+    with dest.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"path": str(dest), "filename": file.filename}
 
 
 def _to_messages(chat_messages) -> list[Message]:
@@ -133,7 +157,8 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         # bridge runs agent.run() synchronously and word-splits the result,
         # so it can't stream tokens in real-time).  For plain chat, stream
         # directly from the engine for true token-by-token output.
-        if agent is not None and bus is not None and request_body.tools:
+        agent_has_tools = agent is not None and getattr(agent, "_tools", None)
+        if agent is not None and bus is not None and (request_body.tools or agent_has_tools):
             return await _handle_agent_stream(agent, bus, model, request_body)
         return await _handle_stream(engine, model, request_body, complexity_info)
 
@@ -354,7 +379,9 @@ async def _handle_stream(
 async def list_models(request: Request) -> ModelListResponse:
     """List available models from the engine."""
     engine = request.app.state.engine
-    model_ids = engine.list_models()
+    # Vision-only models — not usable for chat, used internally by tools
+    _VISION_ONLY = {"moondream", "moondream:latest", "llava", "llava:latest"}
+    model_ids = [m for m in engine.list_models() if m not in _VISION_ONLY]
     return ModelListResponse(
         data=[ModelObject(id=mid) for mid in model_ids],
     )

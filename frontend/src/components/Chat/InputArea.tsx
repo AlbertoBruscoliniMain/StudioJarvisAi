@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip } from 'lucide-react';
+import { Send, Square, ImagePlus, X } from 'lucide-react';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat } from '../../lib/sse';
 import { fetchSavings } from '../../lib/api';
@@ -9,14 +9,18 @@ import type { ChatMessage, ToolCallInfo, TokenUsage, MessageTelemetry } from '..
 
 export function InputArea() {
   const [input, setInput] = useState('');
+  type UploadedImage = { path: string; name: string; preview: string };
+  const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const MAX_IMAGES = 10;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
   const streamState = useAppStore((s) => s.streamState);
-  const messages = useAppStore((s) => s.messages);
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
   const maxTokens = useAppStore((s) => s.settings.maxTokens);
   const temperature = useAppStore((s) => s.settings.temperature);
@@ -52,6 +56,38 @@ export function InputArea() {
     : streamState.isStreaming ? 'streaming'
     : undefined;
 
+  const uploadFile = useCallback(async (file: File, name: string): Promise<void> => {
+    if (uploadedImages.length >= MAX_IMAGES) return;
+    setUploading(true);
+    const preview = URL.createObjectURL(file);
+    try {
+      const formData = new FormData();
+      formData.append('file', file, name);
+      const res = await fetch('http://localhost:8000/v1/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      setUploadedImages((prev) => prev.length < MAX_IMAGES ? [...prev, { path: data.path, name, preview }] : prev);
+    } catch {
+      URL.revokeObjectURL(preview);
+    } finally {
+      setUploading(false);
+    }
+  }, [uploadedImages.length]);
+
+  const handleImageSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    for (const file of files.slice(0, MAX_IMAGES - uploadedImages.length)) {
+      await uploadFile(file, file.name);
+    }
+    e.target.value = '';
+  }, [uploadFile, uploadedImages.length]);
+
+  const removeImage = useCallback((index: number) => {
+    setUploadedImages((prev) => {
+      URL.revokeObjectURL(prev[index].preview);
+      return prev.filter((_, i) => i !== index);
+    });
+  }, []);
+
   const handleMicClick = useCallback(async () => {
     if (speechState === 'recording') {
       try {
@@ -83,11 +119,21 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
+  const clearImages = useCallback(() => {
+    setUploadedImages((prev) => { prev.forEach((img) => URL.revokeObjectURL(img.preview)); return []; });
+  }, []);
+
   const sendMessage = useCallback(async () => {
-    const content = input.trim();
-    if (!content || streamState.isStreaming) return;
+    const text = input.trim();
+    if ((!text && uploadedImages.length === 0) || streamState.isStreaming) return;
+
+    const imageParts = uploadedImages.map((img) => `"${img.path}"`).join(', ');
+    const content = uploadedImages.length > 0
+      ? `Usa il tool image_read per analizzare ${uploadedImages.length > 1 ? `queste immagini una alla volta: ${imageParts}` : `l'immagine in ${imageParts}`}${text ? `. ${text}` : ' e descrivi cosa vedi.'}`
+      : text;
 
     setInput('');
+    clearImages();
 
     let convId = activeId;
     if (!convId) {
@@ -290,6 +336,29 @@ export function InputArea() {
     resetStream,
   ]);
 
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    const items = Array.from(e.clipboardData.items);
+    const imageItem = items.find((item) => item.type.startsWith('image/'));
+    if (!imageItem) return;
+    e.preventDefault();
+    const file = imageItem.getAsFile();
+    if (!file) return;
+    setUploading(true);
+    const preview = URL.createObjectURL(file);
+    try {
+      const formData = new FormData();
+      formData.append('file', file, `screenshot_${Date.now()}.png`);
+      const res = await fetch('http://localhost:8000/v1/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      const name = `screenshot_${Date.now()}.png`;
+      setUploadedImages((prev) => prev.length < MAX_IMAGES ? [...prev, { path: data.path, name, preview }] : prev);
+    } catch {
+      URL.revokeObjectURL(preview);
+    } finally {
+      setUploading(false);
+    }
+  }, []);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -299,6 +368,46 @@ export function InputArea() {
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
+      {/* Image previews */}
+      {uploadedImages.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-2 px-1">
+          {uploadedImages.map((img, i) => (
+            <div key={img.preview} className="relative inline-block">
+              <img
+                src={img.preview}
+                alt={img.name}
+                className="h-16 w-16 rounded-lg object-cover"
+                style={{ border: '1px solid var(--color-input-border)' }}
+              />
+              <button
+                type="button"
+                onClick={() => removeImage(i)}
+                title="Rimuovi immagine"
+                className="absolute -top-1 -right-1 rounded-full p-0.5 cursor-pointer"
+                style={{ background: 'var(--color-error)', color: 'white' }}
+              >
+                <X size={10} />
+              </button>
+            </div>
+          ))}
+          <span className="text-xs self-end mb-1" style={{ color: 'var(--color-text-tertiary)' }}>
+            {uploadedImages.length}/{MAX_IMAGES}
+          </span>
+        </div>
+      )}
+
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        multiple
+        className="hidden"
+        title="Carica immagine"
+        aria-label="Carica immagine"
+        onChange={handleImageSelect}
+      />
+
       <div
         className="flex items-center gap-2 rounded-2xl px-4 py-3 transition-shadow"
         style={{
@@ -312,7 +421,8 @@ export function InputArea() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Message OpenJarvis..."
+          onPaste={handlePaste}
+          placeholder="Message OpenJarvis... (Cmd+V per incollare screenshot)"
           rows={1}
           className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
           style={{ color: 'var(--color-text)', maxHeight: '200px' }}
@@ -329,6 +439,18 @@ export function InputArea() {
           </button>
         ) : (
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={streamState.isStreaming || uploading || uploadedImages.length >= MAX_IMAGES}
+              title={`Carica immagine (${uploadedImages.length}/${MAX_IMAGES})`}
+              className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
+              style={{
+                background: uploadedImages.length > 0 ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
+                color: uploadedImages.length > 0 ? 'white' : 'var(--color-text-tertiary)',
+              }}
+            >
+              <ImagePlus size={16} />
+            </button>
             <MicButton
               state={speechState}
               onClick={handleMicClick}
@@ -337,7 +459,7 @@ export function InputArea() {
             />
             <button
               onClick={sendMessage}
-              disabled={!input.trim() || modelLoading}
+              disabled={(!input.trim() && uploadedImages.length === 0) || modelLoading}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
                 background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',

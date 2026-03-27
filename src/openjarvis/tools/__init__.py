@@ -127,6 +127,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.image_read  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.knowledge_tools  # noqa: F401
 except ImportError:
     pass
